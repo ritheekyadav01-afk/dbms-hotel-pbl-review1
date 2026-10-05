@@ -1,0 +1,171 @@
+[Q1] INNER JOIN (4 tables): every reservation with guest, room, type and rate
+SELECT res.reservation_id, g.full_name, r.room_number, rt.type_name,
+       rp.plan_name, rp.nightly_rate, res.planned_check_in, res.planned_check_out,
+       res.reservation_status
+FROM reservation res
+JOIN guest g       ON res.guest_id = g.guest_id
+JOIN room r        ON res.room_id = r.room_id
+JOIN room_type rt  ON r.type_id = rt.type_id
+JOIN rate_plan rp  ON res.rate_plan_id = rp.rate_plan_id
+ORDER BY res.planned_check_in;
++----------------+--------------+-------------+-----------+---------------------+--------------+------------------+-------------------+--------------------+
+| reservation_id | full_name    | room_number | type_name | plan_name           | nightly_rate | planned_check_in | planned_check_out | reservation_status |
++----------------+--------------+-------------+-----------+---------------------+--------------+------------------+-------------------+--------------------+
+|              3 | Karthik Iyer | 101         | Standard  | Standard - Saver    |      2100.00 | 2026-08-01       | 2026-08-03        | completed          |
+|              1 | Arjun Mehta  | 103         | Standard  | Standard - Flexible |      2500.00 | 2026-09-20       | 2026-09-24        | checked_in         |
+|              5 | Farhan Ali   | 102         | Standard  | Standard - Flexible |      2500.00 | 2026-09-25       | 2026-09-27        | cancelled          |
+|              2 | Priya Sharma | 201         | Deluxe    | Deluxe - Flexible   |      4200.00 | 2026-10-10       | 2026-10-13        | booked             |
+|              4 | Sneha Reddy  | 301         | Suite     | Suite - Flexible    |      7500.00 | 2026-10-15       | 2026-10-18        | booked             |
++----------------+--------------+-------------+-----------+---------------------+--------------+------------------+-------------------+--------------------+
+
+[Q2] LEFT JOIN: every room with its current guest (NULL when vacant)
+SELECT r.room_number, rt.type_name, r.status, g.full_name AS current_guest
+FROM room r
+JOIN room_type rt ON r.type_id = rt.type_id
+LEFT JOIN reservation res ON res.room_id = r.room_id AND res.reservation_status = 'checked_in'
+LEFT JOIN guest g ON res.guest_id = g.guest_id
+ORDER BY r.room_number;
++-------------+-----------+-------------+---------------+
+| room_number | type_name | status      | current_guest |
++-------------+-----------+-------------+---------------+
+| 101         | Standard  | available   | NULL          |
+| 102         | Standard  | available   | NULL          |
+| 103         | Standard  | occupied    | Arjun Mehta   |
+| 201         | Deluxe    | available   | NULL          |
+| 202         | Deluxe    | available   | NULL          |
+| 301         | Suite     | available   | NULL          |
+| 302         | Suite     | maintenance | NULL          |
++-------------+-----------+-------------+---------------+
+
+[Q3] JOIN + aggregate: invoice breakdown per stay (room charge vs services)
+SELECT s.stay_id, g.full_name,
+       DATEDIFF(DATE(s.actual_check_out), DATE(s.actual_check_in)) AS nights,
+       inv.subtotal, inv.tax, inv.total, inv.status
+FROM invoice inv
+JOIN stay s ON inv.stay_id = s.stay_id
+JOIN reservation res ON s.reservation_id = res.reservation_id
+JOIN guest g ON res.guest_id = g.guest_id;
++---------+--------------+--------+----------+--------+---------+--------+
+| stay_id | full_name    | nights | subtotal | tax    | total   | status |
++---------+--------------+--------+----------+--------+---------+--------+
+|       2 | Karthik Iyer |      2 |  4200.00 | 210.00 | 4410.00 | paid   |
++---------+--------------+--------+----------+--------+---------+--------+
+
+[Q4] NESTED SUBQUERY (NOT IN): rooms free for a requested date range
+SELECT r.room_number, rt.type_name
+FROM room r
+JOIN room_type rt ON r.type_id = rt.type_id
+WHERE r.status <> 'maintenance'
+  AND r.room_id NOT IN (
+      SELECT room_id FROM reservation
+      WHERE reservation_status NOT IN ('cancelled','no_show')
+        AND '2026-10-11' < planned_check_out
+        AND '2026-10-12' > planned_check_in)
+ORDER BY r.room_number;
++-------------+-----------+
+| room_number | type_name |
++-------------+-----------+
+| 101         | Standard  |
+| 102         | Standard  |
+| 103         | Standard  |
+| 202         | Deluxe    |
+| 301         | Suite     |
++-------------+-----------+
+
+[Q5] CORRELATED SUBQUERY: stays whose service spend is above the average per stay
+SELECT sc.stay_id, SUM(sc.amount) AS service_spend
+FROM service_charge sc
+GROUP BY sc.stay_id
+HAVING SUM(sc.amount) > (SELECT AVG(t.spend)
+                         FROM (SELECT SUM(amount) AS spend
+                               FROM service_charge GROUP BY stay_id) t);
++---------+---------------+
+| stay_id | service_spend |
++---------+---------------+
+|       2 |       2200.00 |
++---------+---------------+
+
+[Q6] GROUP BY: reservations and average nightly rate per room type
+SELECT rt.type_name, COUNT(res.reservation_id) AS reservations,
+       ROUND(AVG(rp.nightly_rate), 2) AS avg_nightly_rate
+FROM room_type rt
+LEFT JOIN room r ON r.type_id = rt.type_id
+LEFT JOIN reservation res ON res.room_id = r.room_id
+LEFT JOIN rate_plan rp ON res.rate_plan_id = rp.rate_plan_id
+GROUP BY rt.type_name;
++-----------+--------------+------------------+
+| type_name | reservations | avg_nightly_rate |
++-----------+--------------+------------------+
+| Deluxe    |            1 |          4200.00 |
+| Standard  |            3 |          2366.67 |
+| Suite     |            1 |          7500.00 |
++-----------+--------------+------------------+
+
+[Q7] GROUP BY + HAVING: housekeeping workload per staff member
+SELECT st.full_name, st.role, COUNT(ht.task_id) AS tasks,
+       SUM(ht.task_status = 'pending') AS pending
+FROM staff st
+LEFT JOIN housekeeping_task ht ON ht.assigned_to = st.staff_id
+GROUP BY st.staff_id, st.full_name, st.role
+HAVING COUNT(ht.task_id) >= 1;
++--------------+-------------------------+-------+---------+
+| full_name    | role                    | tasks | pending |
++--------------+-------------------------+-------+---------+
+| Lakshmi Devi | Housekeeping Supervisor |     1 |       0 |
+| Ravi Kumar   | Housekeeping Staff      |     2 |       1 |
++--------------+-------------------------+-------+---------+
+
+[Q8] AGGREGATE: total revenue collected and total service revenue
+SELECT (SELECT COALESCE(SUM(amount),0) FROM payment WHERE payment_status='success') AS revenue_collected,
+       (SELECT COALESCE(SUM(amount),0) FROM service_charge) AS service_revenue;
++-------------------+-----------------+
+| revenue_collected | service_revenue |
++-------------------+-----------------+
+|           4410.00 |         2800.00 |
++-------------------+-----------------+
+
+[Q9] SUBQUERY RATIO: cancellation rate
+SELECT ROUND(100 * (SELECT COUNT(*) FROM reservation
+                    WHERE reservation_status IN ('cancelled','no_show'))
+                 / (SELECT COUNT(*) FROM reservation), 2) AS cancellation_pct;
++------------------+
+| cancellation_pct |
++------------------+
+|            20.00 |
++------------------+
+
+[Q10] VIEW: current occupancy report
+SELECT * FROM v_current_occupancy;
++---------+-------------+-----------+-------------+---------------------+-------------------+
+| room_id | room_number | type_name | guest_name  | actual_check_in     | planned_check_out |
++---------+-------------+-----------+-------------+---------------------+-------------------+
+|       3 | 103         | Standard  | Arjun Mehta | 2026-09-20 14:05:00 | 2026-09-24        |
++---------+-------------+-----------+-------------+---------------------+-------------------+
+
+[Q11] VIEW: guest history with spend
+SELECT * FROM v_guest_history;
++----------+--------------+----------------+-------------+---------------------+---------------------+---------------+---------------+
+| guest_id | full_name    | reservation_id | room_number | actual_check_in     | actual_check_out    | service_spend | invoice_total |
++----------+--------------+----------------+-------------+---------------------+---------------------+---------------+---------------+
+|        1 | Arjun Mehta  |              1 | 103         | 2026-09-20 14:05:00 | NULL                |        600.00 |          0.00 |
+|        3 | Karthik Iyer |              3 | 101         | 2026-08-01 13:40:00 | 2026-08-03 11:15:00 |       2200.00 |       4410.00 |
++----------+--------------+----------------+-------------+---------------------+---------------------+---------------+---------------+
+
+[Q12] VIEW: housekeeping status
+SELECT * FROM v_housekeeping_status;
++---------+-------------+------------------------+----------------+-------------+---------------------+---------------------+
+| task_id | room_number | task_type              | assigned_staff | task_status | scheduled_at        | completed_at        |
++---------+-------------+------------------------+----------------+-------------+---------------------+---------------------+
+|       1 | 103         | Daily cleaning         | Ravi Kumar     | done        | 2026-09-21 10:00:00 | 2026-09-21 10:30:00 |
+|       3 | 302         | Maintenance check      | Lakshmi Devi   | in_progress | 2026-09-22 08:00:00 | NULL                |
+|       2 | 101         | Post-checkout cleaning | Ravi Kumar     | pending     | 2026-09-22 09:00:00 | NULL                |
++---------+-------------+------------------------+----------------+-------------+---------------------+---------------------+
+
+[Q13] INDEX USE: the availability lookup uses idx_reservation_dates
+EXPLAIN SELECT reservation_id FROM reservation
+WHERE room_id = 3 AND planned_check_in < '2026-10-01' AND planned_check_out > '2026-09-01';
++----+-------------+-------------+------------+-------+-----------------------+-----------------------+---------+------+------+----------+--------------------------+
+| id | select_type | table       | partitions | type  | possible_keys         | key                   | key_len | ref  | rows | filtered | Extra                    |
++----+-------------+-------------+------------+-------+-----------------------+-----------------------+---------+------+------+----------+--------------------------+
+|  1 | SIMPLE      | reservation | NULL       | range | idx_reservation_dates | idx_reservation_dates | 7       | NULL |    1 |    33.33 | Using where; Using index |
++----+-------------+-------------+------------+-------+-----------------------+-----------------------+---------+------+------+----------+--------------------------+
